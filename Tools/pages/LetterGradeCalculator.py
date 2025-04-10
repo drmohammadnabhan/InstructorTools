@@ -8,64 +8,75 @@ from io import BytesIO # For download button
 import collections # To use OrderedDict for cutoffs
 
 # ============================================
-# Helper Functions
+# Helper Functions (with corrections)
 # ============================================
 
 def calculate_initial_cutoffs_original(a_plus_start, gap):
     """Calculates initial cutoffs working downwards from A+ start with a uniform gap."""
     cutoffs = collections.OrderedDict()
-    grades = ['A+', 'A', 'B+', 'B', 'C+', 'C', 'D+', 'D'] # Standard grades to define boundaries for
+    # Define grades in descending order for calculation logic
+    grades_order = ['A+', 'A', 'B+', 'B', 'C+', 'C', 'D+', 'D']
     current_start = a_plus_start
-    # Define the start score for each grade
-    for i, grade in enumerate(grades):
-        # The key will be the start score threshold for this grade
+
+    for i, grade in enumerate(grades_order):
         cutoffs[f'{grade}_Start'] = current_start
-        if i < len(grades) - 1: # Don't subtract gap after D
+        if i < len(grades_order) - 1: # Don't subtract gap after D
              current_start -= gap
-    # The 'F' range is below the 'D_Start'
-    cutoffs['F_Max'] = cutoffs['D_Start'] # Scores < D_Start are F
+
+    # F is implicitly below the D_Start threshold
+    cutoffs['F_Max'] = cutoffs['D_Start'] # Use D_Start as the upper boundary for F
+    # Sort final dictionary by score descending for potential display consistency elsewhere if needed
+    # cutoffs = collections.OrderedDict(sorted(cutoffs.items(), key=lambda item: item[1], reverse=True))
     return cutoffs
 
+# <<< CORRECTED FUNCTION >>>
 def assign_letter_grades_from_starts(scores, start_cutoffs):
     """Assigns letter grades based on start scores (lower bound inclusive)."""
-    # Create bins and labels from the start cutoffs dictionary
-    # Sort grades based on start score (descending)
-    sorted_grades = sorted(start_cutoffs.items(), key=lambda item: item[1], reverse=True)
+    # start_cutoffs format: {'A+_Start': 95, 'A_Start': 90, ..., 'D_Start': 60, 'F_Max': 60}
 
-    bins = [-np.inf]
-    labels = ['F'] # Start with F for scores below the lowest threshold (D_Start)
+    # Extract the start scores for each grade (excluding F_Max as it's just D_Start)
+    lower_bounds_map = {grade: score for grade, score in start_cutoffs.items() if grade != 'F_Max'}
 
-    # Iterate through sorted grades (A+, A, B+, ...) to define bins and labels
-    for grade, start_score in sorted_grades:
-        if grade == 'F_Max': continue # Skip the F_Max entry
-        # The upper bound of the previous grade's bin is the start score of the current grade
-        bins.append(start_score)
-        # The label corresponds to the grade that starts at this score
-        labels.append(grade) # Label for the interval [start_score, next_start_score)
+    # Get the unique start scores and sort them ASCENDING. These are the boundaries.
+    boundary_scores = sorted(list(set(lower_bounds_map.values())))
 
-    # Add the top bin edge
-    bins.append(np.inf)
+    # Check for monotonicity (this should catch issues from manual input)
+    if not all(boundary_scores[i] < boundary_scores[i+1] for i in range(len(boundary_scores)-1)):
+        st.error("Grade boundary scores must increase monotonically. Check manual inputs.")
+        # Return a Series indicating error
+        return pd.Series(['Error - Non-monotonic Cutoffs'] * len(scores), index=scores.index, dtype='object')
 
-    # Need to reverse labels because pd.cut assigns label[i] to bin[i] to bin[i+1]
-    # Example: bins=[-inf, 60, 65,...], labels=['F','D','C',...]
-    # Interval (-inf, 60) gets label 'F', interval [60, 65) gets 'D' etc.
-    # So labels should be in ascending grade order F, D, D+, C...
-    labels = ['F'] + [grade for grade, score in sorted(start_cutoffs.items(), key=lambda item: item[1]) if grade != 'F_Max']
+    # Create bins for pd.cut. Needs -inf at start, boundaries, +inf at end.
+    bins = [-np.inf] + boundary_scores + [np.inf]
 
-    # Ensure correct number of labels for bins
+    # Create labels corresponding to the bins.
+    # Need grades sorted by their start scores (ascending)
+    grades_sorted_by_score = sorted(lower_bounds_map.keys(), key=lambda grade: lower_bounds_map[grade])
+    # Labels = F, then the grades corresponding to the ascending boundaries
+    labels = ['F'] + grades_sorted_by_score
+
+    # Final check for length mismatch between bins and labels
     if len(labels) != len(bins) - 1:
-        st.error(f"Mismatch between number of bins ({len(bins)}) and labels ({len(labels)}) generated. Check cutoff logic.")
-        # Create a dummy Series to avoid crashing later code
-        return pd.Series(['Error'] * len(scores), index=scores.index)
-
+        st.error(f"CRITICAL: Bin/Label mismatch detected. Bins: {len(bins)}, Labels: {len(labels)}. This indicates an internal logic error.")
+        return pd.Series(['Error - Bin/Label Mismatch'] * len(scores), index=scores.index, dtype='object')
 
     numeric_scores = pd.to_numeric(scores, errors='coerce')
+    # right=False means intervals are [lower, upper)
     grades = pd.cut(numeric_scores, bins=bins, labels=labels, right=False, ordered=True)
+    # Handle potential NaNs from coercion if any scores were non-numeric originally
+    grades = grades.astype('object').fillna('Invalid Score') # Convert to object to allow fillna
+
     return grades
+# <<< END CORRECTION >>>
 
 
 def calculate_stats(df, grade_col, section_col, gpa_map):
     """Calculates distributions and statistics based on assigned grades."""
+    # Ensure grade column exists and handle potential error strings from assign_letter_grades
+    if grade_col not in df.columns or df[grade_col].str.contains('Error', na=False).any():
+        st.warning("Cannot calculate stats due to errors in grade assignment.")
+        return {"error": "Grade assignment failed."}
+
     # Map grades to GPA points
     df['GPA'] = df[grade_col].astype(str).map(gpa_map) # Use astype(str) for robustness
     df['GPA'] = pd.to_numeric(df['GPA'], errors='coerce')
@@ -104,13 +115,14 @@ def calculate_stats(df, grade_col, section_col, gpa_map):
         "overall_gpa": overall_gpa,
         "section_stats": section_stats,
         "anova_result": anova_result,
-        "anova_p_value": anova_p_value
+        "anova_p_value": anova_p_value,
+        "error": None # Indicate success
     }
     return results
 
 
 # Standard GPA Scale
-GPA_SCALE = {'A+': 4.0, 'A': 3.75, 'B+': 3.5, 'B': 3.0, 'C+': 2.5, 'C': 2.0, 'D+': 1.5, 'D': 1.0, 'F': 0.0}
+GPA_SCALE = {'A+': 4.0, 'A': 3.75, 'B+': 3.5, 'B': 3.0, 'C+': 2.5, 'C': 2.0, 'D+': 1.5, 'D': 1.0, 'F': 0.0, 'Invalid Score': np.nan, 'Error': np.nan}
 
 
 # ============================================
@@ -133,14 +145,14 @@ st.info("**Workflow:**\n"
         "5. **Manually Adjust** the start scores for each grade in the 'Manual Cutoff Adjustment' section if needed.\n"
         "6. Click **'Apply Manual Cutoffs & Recalculate'** to see the impact of your changes.\n"
         "7. Repeat steps 1-2 or 5-6 until satisfied.\n"
-        "8. Review the **Final Results** and **Download** the grades.")
+        "8. Review the **Final Results**, including **Failing Student Analysis**, and **Download** the grades.")
 
 
 # --- Sidebar for Initial Parameters ---
 st.sidebar.header("1. Initial Parameters")
-a_plus_start_score = st.sidebar.number_input("A+ Start Score (>= score)", value=95.0, step=0.5, help="The minimum score to get an A+.")
-uniform_grade_gap = st.sidebar.number_input("Uniform Grade Gap (points)", value=5.0, step=0.5, min_value=0.5, help="Initial point difference between consecutive grade start scores (e.g., A starts 'gap' points below A+).")
-points_near_cutoff = st.sidebar.slider("Show Students Near Cutoff (+/- points)", min_value=0.5, max_value=5.0, value=1.5, step=0.5, help="Range around active cutoffs to highlight students for review.")
+a_plus_start_score = st.sidebar.number_input("A+ Start Score (>= score)", value=95.0, step=0.1, format="%.2f", help="The minimum score to get an A+.")
+uniform_grade_gap = st.sidebar.number_input("Uniform Grade Gap (points)", value=5.0, step=0.1, min_value=0.1, format="%.2f", help="Initial point difference between consecutive grade start scores (e.g., A starts 'gap' points below A+).")
+points_near_cutoff = st.sidebar.slider("Show Students Near Cutoff (+/- points)", min_value=0.1, max_value=5.0, value=1.5, step=0.1, format="%.1f", help="Range around active cutoffs to highlight students for review.")
 
 # Initialize session state
 if 'initial_cutoffs' not in st.session_state: st.session_state.initial_cutoffs = None
@@ -148,36 +160,57 @@ if 'active_cutoffs' not in st.session_state: st.session_state.active_cutoffs = N
 if 'df_graded' not in st.session_state: st.session_state.df_graded = None
 if 'stats_results' not in st.session_state: st.session_state.stats_results = None
 if 'manual_override_values' not in st.session_state: st.session_state.manual_override_values = {}
+if 'data_loaded' not in st.session_state: st.session_state.data_loaded = False
 
 
 # --- Button to Calculate Initial Cutoffs ---
 if st.sidebar.button("Calculate Initial Cutoffs"):
     st.session_state.initial_cutoffs = calculate_initial_cutoffs_original(a_plus_start_score, uniform_grade_gap)
     st.session_state.active_cutoffs = st.session_state.initial_cutoffs # Initially, active = initial
-    st.session_state.manual_override_values = st.session_state.initial_cutoffs.copy() # Populate manual fields
+    # Populate manual fields with initial values, ensuring keys exist even if calculation is simple
+    st.session_state.manual_override_values = {
+        'A+_Start': st.session_state.initial_cutoffs.get('A+_Start', 95.0),
+        'A_Start': st.session_state.initial_cutoffs.get('A_Start', 90.0),
+        'B+_Start': st.session_state.initial_cutoffs.get('B+_Start', 85.0),
+        'B_Start': st.session_state.initial_cutoffs.get('B_Start', 80.0),
+        'C+_Start': st.session_state.initial_cutoffs.get('C+_Start', 75.0),
+        'C_Start': st.session_state.initial_cutoffs.get('C_Start', 70.0),
+        'D+_Start': st.session_state.initial_cutoffs.get('D+_Start', 65.0),
+        'D_Start': st.session_state.initial_cutoffs.get('D_Start', 60.0),
+        'F_Max': st.session_state.initial_cutoffs.get('F_Max', 60.0)
+    }
     # Clear previous results if recalculating initial
     st.session_state.df_graded = None
     st.session_state.stats_results = None
     st.sidebar.success("Initial cutoffs calculated.")
+    # Force rerun/update of main panel if data is already loaded
+    if st.session_state.data_loaded: st.experimental_rerun()
 
 
 # --- Main Area ---
 
 # Display Initial/Active Cutoffs if calculated
+cutoff_display_area = st.empty() # Placeholder for cutoffs display
 if st.session_state.active_cutoffs:
-    st.header("Current Active Cutoffs")
+    cutoff_display_area.header("Current Active Cutoffs")
     cutoff_df = pd.DataFrame(list(st.session_state.active_cutoffs.items()), columns=['Grade Start / F Max', 'Score Threshold'])
-    st.dataframe(cutoff_df.style.format({"Score Threshold": "{:.2f}"}))
+    cutoff_display_area.dataframe(cutoff_df.style.format({"Score Threshold": "{:.2f}"}))
 else:
-    st.warning("Calculate initial cutoffs using the sidebar button first.")
+    cutoff_display_area.warning("Calculate initial cutoffs using the sidebar button first.")
 
 
 st.header("2. Upload & Prepare Data")
-uploaded_file = st.file_uploader("Upload course scores (CSV or Excel)", type=["csv", "xlsx"])
+uploaded_file = st.file_uploader("Upload course scores (CSV or Excel)", type=["csv", "xlsx"], key="file_uploader")
 
 df_display = None # Define df_display to hold the dataframe for display/analysis
+if 'processed_df' not in st.session_state: st.session_state.processed_df = None
 
 if uploaded_file:
+    # Reset flags if a new file is uploaded
+    # Check if file content is different? Simple check by name/size for now.
+    # This logic might need refinement based on how session state persists across uploads.
+    # A button "Load/Process File" might be more explicit.
+
     try:
         if uploaded_file.name.endswith('.csv'):
             df_upload = pd.read_csv(uploaded_file)
@@ -188,9 +221,9 @@ if uploaded_file:
         cols = df_upload.columns.tolist()
         cols_with_none = ["<Select Column>"] + cols
 
-        col_id = st.selectbox("Select Student ID Column (Optional)", options=cols_with_none, index=0, key='sel_id_orig')
-        col_score = st.selectbox("Select Score Column", options=cols_with_none, index=0, key='sel_score_orig')
-        col_section = st.selectbox("Select Section Column", options=cols_with_none, index=0, key='sel_section_orig')
+        col_id = st.selectbox("Select Student ID Column (Optional)", options=cols_with_none, index=0, key='sel_id_orig_v2')
+        col_score = st.selectbox("Select Score Column", options=cols_with_none, index=0, key='sel_score_orig_v2')
+        col_section = st.selectbox("Select Section Column", options=cols_with_none, index=0, key='sel_section_orig_v2')
 
         if col_score != "<Select Column>" and col_section != "<Select Column>":
              # Process the dataframe
@@ -199,92 +232,128 @@ if uploaded_file:
              if col_id != "<Select Column>":
                   df.rename(columns={col_id: 'StudentID'}, inplace=True)
              else:
-                  df['StudentID'] = 'Stud_' + df.index.astype(str)
+                  # Create default ID only if StudentID doesn't already exist from renaming
+                  if 'StudentID' not in df.columns:
+                       df['StudentID'] = 'Stud_' + df.index.astype(str)
+
+             # Data Cleaning (only keep essential columns + ID for processing)
+             essential_cols = ['Score', 'Section']
+             if 'StudentID' in df.columns: essential_cols.append('StudentID')
+             df = df[essential_cols] # Keep only needed cols
 
              df['Score'] = pd.to_numeric(df['Score'], errors='coerce')
              initial_rows = len(df)
-             df.dropna(subset=['Score'], inplace=True)
+             df.dropna(subset=['Score'], inplace=True) # Remove rows with non-numeric scores
              removed_rows = initial_rows - len(df)
              if removed_rows > 0: st.warning(f"Removed {removed_rows} rows with invalid/missing scores.")
 
              if df.empty:
                   st.error("No valid score data remaining.")
+                  st.session_state.data_loaded = False
+                  st.session_state.processed_df = None
              else:
                   df['Section'] = df['Section'].astype(str)
-                  df_display = df # Assign the processed dataframe
+                  st.session_state.processed_df = df # Store processed df
+                  st.session_state.data_loaded = True
                   st.success("Data loaded and columns mapped.")
+
 
         else:
              st.warning("Please select Score and Section columns.")
+             st.session_state.data_loaded = False
+             st.session_state.processed_df = None
 
     except Exception as e:
         st.error(f"Error loading or processing file: {e}")
+        st.session_state.data_loaded = False
+        st.session_state.processed_df = None
+
+# Assign df_display if data is loaded
+if st.session_state.data_loaded and st.session_state.processed_df is not None:
+    df_display = st.session_state.processed_df
 
 
 # --- Sections that require data and active cutoffs ---
-if df_display is not None and st.session_state.active_cutoffs is not None:
+if st.session_state.data_loaded and df_display is not None and st.session_state.active_cutoffs is not None:
 
+    # --- Manual Cutoff Adjustment ---
     st.header("3. Manual Cutoff Adjustment")
     st.markdown("Review visualizations below. If needed, adjust the **Start Score** for each grade here and click 'Apply'.")
 
     manual_cutoffs_input = {}
-    # Use columns for better layout if many grades
+    # Use columns for better layout
     col_a_plus, col_a, col_b_plus, col_b = st.columns(4)
     col_c_plus, col_c, col_d_plus, col_d = st.columns(4)
 
-    # Dynamically create inputs based on active cutoffs, populate with current values
+    # Populate inputs with values stored in session state (initially from calculation, then from user)
+    # Use unique keys for each input widget
     current_manual_vals = st.session_state.manual_override_values
-    # This assumes cutoffs dict keys are like 'A+_Start', 'A_Start' etc.
     with col_a_plus:
-        manual_cutoffs_input['A+_Start'] = st.number_input("A+ Start", value=current_manual_vals.get('A+_Start', 95.0), step=0.1, key='man_A+', format="%.2f")
+        manual_cutoffs_input['A+_Start'] = st.number_input("A+ Start", value=current_manual_vals.get('A+_Start', 95.0), step=0.1, key='man_A+_v2', format="%.2f")
     with col_a:
-        manual_cutoffs_input['A_Start'] = st.number_input("A Start", value=current_manual_vals.get('A_Start', 90.0), step=0.1, key='man_A', format="%.2f")
+        manual_cutoffs_input['A_Start'] = st.number_input("A Start", value=current_manual_vals.get('A_Start', 90.0), step=0.1, key='man_A_v2', format="%.2f")
     with col_b_plus:
-        manual_cutoffs_input['B+_Start'] = st.number_input("B+ Start", value=current_manual_vals.get('B+_Start', 85.0), step=0.1, key='man_B+', format="%.2f")
+        manual_cutoffs_input['B+_Start'] = st.number_input("B+ Start", value=current_manual_vals.get('B+_Start', 85.0), step=0.1, key='man_B+_v2', format="%.2f")
     with col_b:
-        manual_cutoffs_input['B_Start'] = st.number_input("B Start", value=current_manual_vals.get('B_Start', 80.0), step=0.1, key='man_B', format="%.2f")
+        manual_cutoffs_input['B_Start'] = st.number_input("B Start", value=current_manual_vals.get('B_Start', 80.0), step=0.1, key='man_B_v2', format="%.2f")
     with col_c_plus:
-        manual_cutoffs_input['C+_Start'] = st.number_input("C+ Start", value=current_manual_vals.get('C+_Start', 75.0), step=0.1, key='man_C+', format="%.2f")
+        manual_cutoffs_input['C+_Start'] = st.number_input("C+ Start", value=current_manual_vals.get('C+_Start', 75.0), step=0.1, key='man_C+_v2', format="%.2f")
     with col_c:
-        manual_cutoffs_input['C_Start'] = st.number_input("C Start", value=current_manual_vals.get('C_Start', 70.0), step=0.1, key='man_C', format="%.2f")
+        manual_cutoffs_input['C_Start'] = st.number_input("C Start", value=current_manual_vals.get('C_Start', 70.0), step=0.1, key='man_C_v2', format="%.2f")
     with col_d_plus:
-        manual_cutoffs_input['D+_Start'] = st.number_input("D+ Start", value=current_manual_vals.get('D+_Start', 65.0), step=0.1, key='man_D+', format="%.2f")
+        manual_cutoffs_input['D+_Start'] = st.number_input("D+ Start", value=current_manual_vals.get('D+_Start', 65.0), step=0.1, key='man_D+_v2', format="%.2f")
     with col_d:
-        manual_cutoffs_input['D_Start'] = st.number_input("D Start", value=current_manual_vals.get('D_Start', 60.0), step=0.1, key='man_D', format="%.2f")
+        manual_cutoffs_input['D_Start'] = st.number_input("D Start", value=current_manual_vals.get('D_Start', 60.0), step=0.1, key='man_D_v2', format="%.2f")
 
-    # Add F_Max for consistency, though it shouldn't change unless D_Start changes
+    # Update F_Max based on D_Start input
     manual_cutoffs_input['F_Max'] = manual_cutoffs_input['D_Start']
 
 
     if st.button("Apply Manual Cutoffs & Recalculate"):
-        # Basic validation: check if start scores are descending
+        # Basic validation: check if start scores are descending (ignoring F_Max)
         scores_list = [s for g, s in manual_cutoffs_input.items() if g != 'F_Max']
+        # Check >= allowing boundaries to be equal
         if not all(scores_list[i] >= scores_list[i+1] for i in range(len(scores_list)-1)):
-             st.error("Manual Start Scores must be in descending order (A+ >= A >= B+...). Please correct.")
+             st.error("Manual Start Scores must be in descending or equal order (A+ >= A >= B+...). Please correct.")
         else:
              # Update active cutoffs and stored manual values
+             # Sort the final dict by score to ensure consistency if needed later
              st.session_state.active_cutoffs = collections.OrderedDict(sorted(manual_cutoffs_input.items(), key=lambda item: item[1], reverse=True))
              st.session_state.manual_override_values = manual_cutoffs_input.copy()
              # Clear previous results to force recalculation
              st.session_state.df_graded = None
              st.session_state.stats_results = None
              st.success("Manual cutoffs applied. Recalculating results...")
-             # Rerun the grade assignment and stats calculation implicitly on next page load
-             # Or trigger explicitly here:
-             df_display['Letter_Grade'] = assign_letter_grades_from_starts(df_display['Score'], st.session_state.active_cutoffs)
-             st.session_state.stats_results = calculate_stats(df_display, 'Letter_Grade', 'Section', GPA_SCALE)
-             st.session_state.df_graded = df_display # Store df with new grades
+             # Use experimental_rerun to ensure the rest of the script uses the new state
+             st.experimental_rerun()
+
+    # Perform grade assignment and stats calculation based on ACTIVE cutoffs
+    # This block runs whenever the script reruns after data is loaded and cutoffs are active
+    # Ensure df_display is the processed dataframe from session state
+    df_calc = st.session_state.processed_df.copy()
+    df_calc['Letter_Grade'] = assign_letter_grades_from_starts(df_calc['Score'], st.session_state.active_cutoffs)
+    # Check if grade assignment produced errors before calculating stats
+    if not df_calc['Letter_Grade'].astype(str).str.contains('Error', na=False).any():
+        st.session_state.stats_results = calculate_stats(df_calc, 'Letter_Grade', 'Section', GPA_SCALE)
+        st.session_state.df_graded = df_calc # Store df with new grades
+    else:
+        st.error("Could not calculate statistics due to errors in grade assignment (check cutoffs).")
+        st.session_state.stats_results = None
+        st.session_state.df_graded = None
 
 
+    # --- Visualization & Observation ---
     st.header("4. Visualization & Observation")
     st.markdown("Use these visualizations to assess the impact of the **Active Cutoffs**.")
 
     active_cutoff_values = [s for g, s in st.session_state.active_cutoffs.items() if g != 'F_Max']
+    active_cutoff_values = sorted(list(set(active_cutoff_values))) # Unique ascending boundaries
 
     # --- Histogram ---
     st.subheader("Score Distribution with Active Cutoffs")
     fig_hist, ax_hist = plt.subplots(figsize=(10, 5))
-    sns.histplot(df_display['Score'], kde=True, ax=ax_hist, bins=30) # Allow adjusting bins?
+    sns.histplot(df_display['Score'], kde=False, ax=ax_hist, bins=30) # Allow adjusting bins?
+    sns.kdeplot(df_display['Score'], ax=ax_hist, color='orange', warn_singular=False) # Overlay KDE
     for cutoff in active_cutoff_values:
         ax_hist.axvline(cutoff, color='red', linestyle='--', linewidth=1)
     ax_hist.set_title("Score Distribution")
@@ -294,66 +363,111 @@ if df_display is not None and st.session_state.active_cutoffs is not None:
     # --- Strip Plot (Shows individual points) ---
     st.subheader("Individual Scores with Active Cutoffs")
     fig_strip, ax_strip = plt.subplots(figsize=(10, 4))
-    sns.stripplot(x=df_display['Score'], ax=ax_strip, jitter=0.2, size=3, alpha=0.7)
+    sns.stripplot(x=df_display['Score'], ax=ax_strip, jitter=0.3, size=3.5, alpha=0.6) # Adjusted jitter/size
     for cutoff in active_cutoff_values:
         ax_strip.axvline(cutoff, color='red', linestyle='--', linewidth=1)
     ax_strip.set_title("Individual Scores")
+    ax_strip.set_xlabel("Score")
     st.pyplot(fig_strip)
     plt.close(fig_strip)
 
     # --- Students Near Cutoffs ---
-    st.subheader("Students Near Active Cutoffs")
+    st.subheader(f"Students Near Active Cutoffs (+/- {points_near_cutoff} points)")
     students_near_cutoff_list = []
-    df_temp_graded = df_display.copy() # Use a copy for temporary grade assignment based on active cutoffs
-    df_temp_graded['Temp_Grade'] = assign_letter_grades_from_starts(df_temp_graded['Score'], st.session_state.active_cutoffs)
+    # Use the graded df from session state if available, otherwise use temp calc
+    df_temp_graded = st.session_state.df_graded if st.session_state.df_graded is not None else df_calc
 
-    for grade_start_key, cutoff_score in st.session_state.active_cutoffs.items():
-        if grade_start_key == 'F_Max': continue
-        min_score = cutoff_score - points_near_cutoff
-        max_score = cutoff_score + points_near_cutoff
-        nearby_df = df_temp_graded[(df_temp_graded['Score'] >= min_score) & (df_temp_graded['Score'] < max_score)].copy() # Use < max_score for range
-        if not nearby_df.empty:
-             nearby_df['Near_Boundary'] = f"{grade_start_key} ({cutoff_score:.2f})"
-             students_near_cutoff_list.append(nearby_df[['StudentID', 'Score', 'Section', 'Near_Boundary', 'Temp_Grade']])
+    # Check if 'Letter_Grade' exists before proceeding
+    if 'Letter_Grade' in df_temp_graded.columns:
+        for grade_start_key, cutoff_score in st.session_state.active_cutoffs.items():
+            if grade_start_key == 'F_Max': continue # Don't show near F boundary
+            min_score = cutoff_score - points_near_cutoff
+            max_score = cutoff_score + points_near_cutoff
+            # Ensure score column is numeric before comparison
+            nearby_df = df_temp_graded[
+                (pd.to_numeric(df_temp_graded['Score'], errors='coerce') >= min_score) &
+                (pd.to_numeric(df_temp_graded['Score'], errors='coerce') < max_score)
+            ].copy()
 
-    if students_near_cutoff_list:
-        students_near_df = pd.concat(students_near_cutoff_list).sort_values('Score')
-        st.dataframe(students_near_df)
+            if not nearby_df.empty:
+                 nearby_df['Near_Boundary'] = f"{grade_start_key} ({cutoff_score:.2f})"
+                 # Select columns, ensure they exist
+                 cols_to_show = ['StudentID', 'Score', 'Section', 'Near_Boundary', 'Letter_Grade']
+                 cols_exist = [col for col in cols_to_show if col in nearby_df.columns]
+                 students_near_cutoff_list.append(nearby_df[cols_exist])
+
+        if students_near_cutoff_list:
+            students_near_df = pd.concat(students_near_cutoff_list).sort_values('Score')
+            st.dataframe(students_near_df)
+        else:
+            st.write("No students found within the specified range of active cutoffs.")
     else:
-        st.write("No students found within the specified range of active cutoffs.")
+        st.warning("Grade calculation needed to show students near cutoffs.")
 
-
-    # --- Trigger Calculation if not already done by button ---
-    # This section ensures results are shown if data/cutoffs are ready
-    if st.session_state.df_graded is None or st.session_state.stats_results is None:
-         df_display['Letter_Grade'] = assign_letter_grades_from_starts(df_display['Score'], st.session_state.active_cutoffs)
-         st.session_state.stats_results = calculate_stats(df_display, 'Letter_Grade', 'Section', GPA_SCALE)
-         st.session_state.df_graded = df_display
 
     # --- Display Final Results ---
     st.header("5. Final Results (Based on Active Cutoffs)")
-    if st.session_state.stats_results:
+    if st.session_state.stats_results and st.session_state.stats_results.get("error") is None:
         results = st.session_state.stats_results
         col_res1, col_res2 = st.columns(2)
         with col_res1:
              st.write("**Overall Distribution:**")
-             st.dataframe(results['overall_dist'].apply("{:.1%}".format))
-             st.write(f"**Overall Avg GPA:** {results.get('overall_gpa', 'N/A'):.2f}")
+             if "overall_dist" in results and not results['overall_dist'].empty:
+                  st.dataframe(results['overall_dist'].apply("{:.1%}".format))
+                  st.write(f"**Overall Avg GPA:** {results.get('overall_gpa', 'N/A'):.2f}")
+
+                  # Overall Dist Plot
+                  try:
+                       fig_dist, ax_dist = plt.subplots()
+                       results['overall_dist'].sort_index().plot(kind='bar', ax=ax_dist)
+                       ax_dist.set_ylabel("Proportion")
+                       ax_dist.set_title("Overall Grade Distribution")
+                       plt.xticks(rotation=45)
+                       st.pyplot(fig_dist)
+                       plt.close(fig_dist)
+                  except Exception as e: st.warning(f"Could not plot overall dist: {e}")
+
+             else: st.write("N/A")
         with col_res2:
              st.write("**Per Section Avg GPA:**")
-             st.dataframe(results['section_stats'][['Section', 'Avg_GPA']].style.format({"Avg_GPA": "{:.2f}"}))
+             if "section_stats" in results and not results['section_stats'].empty:
+                  st.dataframe(results['section_stats'][['Section', 'Avg_GPA']].style.format({"Avg_GPA": "{:.2f}"}))
+             else: st.write("N/A")
+
              st.write(f"**ANOVA Result:** {results.get('anova_result', 'N/A')}")
              anova_p = results.get('anova_p_value')
              if anova_p is not None and anova_p < 0.05: st.warning("Significant difference in section GPAs detected.")
 
-        st.subheader("Final Assigned Grades")
+        # --- Failing Students Section ---
+        st.subheader("Failing Students Analysis")
+        if st.session_state.df_graded is not None and 'Letter_Grade' in st.session_state.df_graded.columns:
+            passing_score = st.session_state.active_cutoffs.get('D_Start', None) # Get the start score for D
+            if passing_score is not None:
+                failing_students = st.session_state.df_graded[st.session_state.df_graded['Letter_Grade'] == 'F'].copy()
+                if not failing_students.empty:
+                    failing_students['Points_Below_Pass'] = passing_score - failing_students['Score']
+                    failing_students.sort_values('Points_Below_Pass', ascending=True, inplace=True) # Show closest first
+                    st.write(f"Passing Score (D Start): {passing_score:.2f}")
+                    cols_fail = ['StudentID', 'Score', 'Section', 'Points_Below_Pass']
+                    cols_fail_exist = [col for col in cols_fail if col in failing_students.columns]
+                    st.dataframe(failing_students[cols_fail_exist].style.format({"Score": "{:.2f}", "Points_Below_Pass": "{:.2f}"}))
+                else:
+                    st.success("No students received an 'F' grade based on active cutoffs.")
+            else:
+                st.warning("Could not determine passing score ('D_Start') from active cutoffs.")
+        else:
+            st.warning("Final grades needed to analyze failing students.")
+        # --- End Failing Students Section ---
+
+
+        st.subheader("Final Assigned Grades Table")
         if st.session_state.df_graded is not None:
              display_cols = ['StudentID', 'Score', 'Section', 'Letter_Grade', 'GPA']
              display_cols = [col for col in display_cols if col in st.session_state.df_graded.columns]
              st.dataframe(st.session_state.df_graded[display_cols])
 
              # Download Button
-             @st.cache_data
+             @st.cache_data # Cache the conversion
              def convert_df_to_csv_orig(df_to_convert):
                  dl_cols = ['StudentID', 'Score', 'Section', 'Letter_Grade', 'GPA']
                  dl_cols = [col for col in dl_cols if col in df_to_convert.columns]
@@ -362,15 +476,14 @@ if df_display is not None and st.session_state.active_cutoffs is not None:
              try:
                 csv_data = convert_df_to_csv_orig(st.session_state.df_graded)
                 st.download_button(label="Download Final Grades as CSV", data=csv_data, file_name='final_grades.csv', mime='text/csv')
-             except Exception as e:
-                st.error(f"Could not prepare download file: {e}")
+             except Exception as e: st.error(f"Could not prepare download file: {e}")
 
         else:
              st.warning("Final grade assignments not yet calculated.")
-    else:
-         st.warning("Statistics could not be calculated. Check data and cutoffs.")
+    elif st.session_state.active_cutoffs: # Check if cutoffs exist but stats failed
+         st.warning("Statistics could not be calculated. Check data, grade assignment, and cutoffs.")
 
 
 # Footer
 st.sidebar.markdown("---")
-st.sidebar.info("Iterative Grading Tool v0.9")
+st.sidebar.info("Iterative Grading Tool v1.0")
