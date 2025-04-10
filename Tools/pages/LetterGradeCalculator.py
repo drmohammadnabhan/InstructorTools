@@ -6,7 +6,7 @@ import seaborn as sns
 from scipy import stats
 from io import BytesIO
 import collections
-import itertools
+import itertools # To cycle through colors if many sections
 
 # ============================================
 # Helper Functions (No changes needed here from previous version)
@@ -31,13 +31,13 @@ def assign_letter_grades_from_starts(scores, start_cutoffs):
     if not all(boundary_scores[i] < boundary_scores[i+1] for i in range(len(boundary_scores)-1)):
         unique_scores_count = len(boundary_scores)
         total_scores_count = len(lower_bounds_map)
-        if unique_scores_count < total_scores_count:
+        if unique_scores_count < total_scores_count: # Allow only if scores are identical, not inverted
              if not all(boundary_scores[i] <= boundary_scores[i+1] for i in range(len(boundary_scores)-1)):
                  st.error("Grade boundary scores must increase monotonically (or be equal). Check manual inputs.")
                  return pd.Series(['Error - Non-monotonic Cutoffs'] * len(scores), index=scores.index, dtype='object')
              else:
                  st.warning("Duplicate start scores detected; using unique boundaries. Grades might merge.")
-        else:
+        else: # Should only happen if logic error or inverted scores
              st.error("Grade boundary scores must increase monotonically. Check manual inputs.")
              return pd.Series(['Error - Non-monotonic Cutoffs'] * len(scores), index=scores.index, dtype='object')
 
@@ -122,9 +122,9 @@ def get_section_color_fixed(section_name):
 def apply_row_styles(row):
     styles = [''] * len(row)
     grade_idx = row.index.get_loc('Letter_Grade') if 'Letter_Grade' in row.index else -1
-    if grade_idx != -1: styles[grade_idx] = f'background-color: {GRADE_COLORS.get(row.iloc[grade_idx], GRADE_COLORS["default"])}'
+    if grade_idx != -1: styles[grade_idx] = f'background-color: {GRADE_COLORS.get(str(row.iloc[grade_idx]), GRADE_COLORS["default"])}' # Added str() for safety
     section_idx = row.index.get_loc('Section') if 'Section' in row.index else -1
-    if section_idx != -1: styles[section_idx] = f'background-color: {get_section_color_fixed(row.iloc[section_idx])}'
+    if section_idx != -1: styles[section_idx] = f'background-color: {get_section_color_fixed(str(row.iloc[section_idx]))}' # Added str() for safety
     return styles
 
 # ============================================
@@ -132,8 +132,8 @@ def apply_row_styles(row):
 # ============================================
 
 st.set_page_config(layout="wide")
-st.title("Iterative Grading Assistant v1.3") # Version update
-# ... (Instructions markdown updated slightly) ...
+st.title("Iterative Grading Assistant v1.4") # Version update
+# ... (Instructions markdown remains largely the same) ...
 st.info("**Workflow:**\n"
         "1. Set **Initial Parameters** (A+ Start, Uniform Gap) in the sidebar.\n"
         "2. Click **'Calculate Initial Cutoffs'**.\n"
@@ -180,8 +180,8 @@ if st.sidebar.button("Calculate Initial Cutoffs"):
     st.session_state.stats_results = None
     st.sidebar.success("Initial cutoffs calculated.")
     if st.session_state.data_loaded:
-        # <<< Fixed experimental_rerun call >>>
-        st.experimental_rerun()
+        # <<< Fixed experimental_rerun call to st.rerun() >>>
+        st.rerun()
         # <<< End Fix >>>
 
 
@@ -197,12 +197,14 @@ else:
 
 
 st.header("2. Upload & Prepare Data")
-uploaded_file = st.file_uploader("Upload course scores (CSV or Excel)", type=["csv", "xlsx"], key="file_uploader_v4")
+uploaded_file = st.file_uploader("Upload course scores (CSV or Excel)", type=["csv", "xlsx"], key="file_uploader_v5") # Incremented key
+
 
 col_id, col_score, col_section, col_first, col_last = None, None, None, None, None
 
 if uploaded_file:
     try:
+        # --- File Reading ---
         if uploaded_file.name.endswith('.csv'): df_upload = pd.read_csv(uploaded_file)
         else: df_upload = pd.read_excel(uploaded_file)
         st.success("File uploaded successfully!")
@@ -212,35 +214,37 @@ if uploaded_file:
         cols_with_none = ["<Select Column>"] + cols
 
         # --- Column Mapping (including First/Last Name) ---
-        col_first = st.selectbox("Select First Name Column (Optional)", options=cols_with_none, index=0, key='sel_first_v4')
-        col_last = st.selectbox("Select Last Name Column (Optional)", options=cols_with_none, index=0, key='sel_last_v4')
-        col_id = st.selectbox("Select Student ID Column (Optional)", options=cols_with_none, index=0, key='sel_id_orig_v5')
-        col_score = st.selectbox("Select Score Column*", options=cols_with_none, index=0, key='sel_score_orig_v5')
-        col_section = st.selectbox("Select Section Column*", options=cols_with_none, index=0, key='sel_section_orig_v5')
+        col_first = st.selectbox("Select First Name Column (Optional)", options=cols_with_none, index=0, key='sel_first_v5')
+        col_last = st.selectbox("Select Last Name Column (Optional)", options=cols_with_none, index=0, key='sel_last_v5')
+        col_id = st.selectbox("Select Student ID Column (Optional)", options=cols_with_none, index=0, key='sel_id_orig_v6')
+        col_score = st.selectbox("Select Score Column*", options=cols_with_none, index=0, key='sel_score_orig_v6')
+        col_section = st.selectbox("Select Section Column*", options=cols_with_none, index=0, key='sel_section_orig_v6')
         st.caption("*Mandatory columns")
 
         if col_score != "<Select Column>" and col_section != "<Select Column>":
              df = df_upload.copy()
-             # Rename mandatory columns
+             # Rename mandatory cols
              df.rename(columns={col_score: 'Score', col_section: 'Section'}, inplace=True)
+
              # --- Handle Optional Columns & Keep Original Names ---
-             # Create a list of essential columns we will definitely need
-             essential_cols = ['Score', 'Section']
-             final_cols_to_keep = ['Score', 'Section'] # Start with mandatory renamed
+             final_cols_to_keep = ['Score', 'Section']
+             name_cols_found = [] # Track which name columns are used
 
              if col_id != "<Select Column>":
                  df.rename(columns={col_id: 'StudentID'}, inplace=True)
                  if 'StudentID' not in final_cols_to_keep: final_cols_to_keep.append('StudentID')
-             elif 'StudentID' not in df.columns: # Create default ID only if NO column was mapped AND 'StudentID' doesn't exist
+             elif 'StudentID' not in df.columns:
                  df['StudentID'] = 'Stud_' + df.index.astype(str)
                  if 'StudentID' not in final_cols_to_keep: final_cols_to_keep.append('StudentID')
 
              if col_first != "<Select Column>":
                  df.rename(columns={col_first: 'FirstName'}, inplace=True)
                  if 'FirstName' not in final_cols_to_keep: final_cols_to_keep.append('FirstName')
+                 name_cols_found.append('FirstName')
              if col_last != "<Select Column>":
                  df.rename(columns={col_last: 'LastName'}, inplace=True)
                  if 'LastName' not in final_cols_to_keep: final_cols_to_keep.append('LastName')
+                 name_cols_found.append('LastName')
              # --- End Optional Column Handling ---
 
              # Keep only the columns we need/mapped
@@ -257,19 +261,23 @@ if uploaded_file:
                   st.error("No valid score data remaining."); st.session_state.data_loaded = False; st.session_state.processed_df = None
              else:
                   df['Section'] = df['Section'].astype(str)
-                  # Ensure StudentID is string if it exists
                   if 'StudentID' in df.columns: df['StudentID'] = df['StudentID'].astype(str)
+                  if 'FirstName' in df.columns: df['FirstName'] = df['FirstName'].astype(str).fillna('') # Ensure names are string
+                  if 'LastName' in df.columns: df['LastName'] = df['LastName'].astype(str).fillna('')
+
                   st.session_state.processed_df = df; st.session_state.data_loaded = True; st.success("Data loaded and columns mapped.")
 
                   st.subheader("Data Preview")
                   preview_cols = ['Score', 'Section'] # Base preview cols
+                  # Show separate names if available
+                  if 'LastName' in df.columns: preview_cols.insert(0,'LastName')
                   if 'FirstName' in df.columns: preview_cols.insert(0,'FirstName')
-                  if 'LastName' in df.columns: preview_cols.insert(1,'LastName')
-                  if 'StudentID' in df.columns and 'FirstName' not in preview_cols and 'LastName' not in preview_cols : preview_cols.insert(0,'StudentID') # Show ID if no name
-                  st.dataframe(st.session_state.processed_df[preview_cols].head())
+                  # Show ID only if no name columns were mapped/found
+                  if not name_cols_found and 'StudentID' in df.columns: preview_cols.insert(0,'StudentID')
+                  st.dataframe(st.session_state.processed_df[[col for col in preview_cols if col in df.columns]].head())
                   st.write(st.session_state.processed_df['Score'].describe())
 
-                  st.session_state.df_graded = None; st.session_state.stats_results = None
+                  st.session_state.df_graded = None; st.session_state.stats_results = None # Reset results on new data load/map
 
         else:
              st.warning("Please select the Score and Section columns."); st.session_state.data_loaded = False; st.session_state.processed_df = None
@@ -300,7 +308,7 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
         with cols_map[i]:
              grade_label = key.replace('_Start', ' Start')
              default_val = current_manual_vals.get(key, 0.0)
-             manual_cutoffs_input[key] = st.number_input(grade_label, value=float(default_val), step=0.1, key=f'man_{key}_v5', format="%.2f")
+             manual_cutoffs_input[key] = st.number_input(grade_label, value=float(default_val), step=0.1, key=f'man_{key}_v6', format="%.2f")
     manual_cutoffs_input['F_Max'] = manual_cutoffs_input['D_Start']
     if st.button("Apply Manual Cutoffs & Recalculate"):
         scores_list = [manual_cutoffs_input[key] for key in grade_keys_in_order]
@@ -312,7 +320,7 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
              st.session_state.df_graded = None; st.session_state.stats_results = None
              st.success("Manual cutoffs applied. Recalculating results...")
              # <<< Fixed experimental_rerun call >>>
-             st.experimental_rerun()
+             st.rerun()
              # <<< End Fix >>>
 
 
@@ -344,7 +352,7 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
     hist_col, slider_col = st.columns([4, 1]) # Allocate space for plot and slider
     with slider_col:
         # <<< Added Slider for Bins >>>
-        num_bins = st.slider("Histogram Bins", min_value=5, max_value=50, value=25, key='hist_bins_v2')
+        num_bins = st.slider("Histogram Bins", min_value=5, max_value=50, value=25, key='hist_bins_v3')
         # <<< End Slider >>>
     with hist_col:
         fig_hist, ax_hist = plt.subplots(figsize=(10, 5))
@@ -367,17 +375,15 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
         fig_strip, ax_strip = plt.subplots(figsize=(10, max(4, len(unique_sections_plot) * 0.5))) # Adjust height for sections
         # <<< Added hue and legend >>>
         sns.stripplot(data=df_display, x='Score', y='Section', hue='Section',
-                      order=unique_sections_plot, # Ensure consistent y-axis order
-                      hue_order=unique_sections_plot, # Ensure consistent legend order
+                      order=unique_sections_plot, hue_order=unique_sections_plot,
                       ax=ax_strip, jitter=0.3, size=4, alpha=0.7, legend=True,
                       palette=plot_palette)
         # <<< End hue/legend add >>>
         for cutoff in active_cutoff_scores_asc:
             ax_strip.axvline(cutoff, color='red', linestyle='--', linewidth=1)
         ax_strip.set_title("Individual Scores by Section"); ax_strip.set_xlabel("Score"); ax_strip.set_ylabel("Section")
-        # Place legend outside plot
         ax_strip.legend(title='Section', bbox_to_anchor=(1.02, 1), loc='upper left')
-        plt.tight_layout(rect=[0, 0, 0.9, 1]) # Adjust layout to make space for legend
+        plt.tight_layout(rect=[0, 0, 0.9, 1]) # Adjust layout for legend
         st.pyplot(fig_strip)
         plt.close(fig_strip)
     else:
@@ -387,7 +393,7 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
     # <<< Updated Label and Logic >>>
     st.subheader(f"Students Below Cutoffs (within {points_near_cutoff} points)")
     students_near_cutoff_list = []
-    df_temp_graded = st.session_state.df_graded if st.session_state.df_graded is not None else None
+    df_temp_graded = st.session_state.df_graded if st.session_state.df_graded is not None else None # Use final graded df if available
 
     if df_temp_graded is not None and 'Letter_Grade' in df_temp_graded.columns and not df_temp_graded['Letter_Grade'].astype(str).str.contains('Error', na=False).any():
         start_score_to_grade = {score: grade for grade, score in active_cutoff_values_map.items()}
@@ -401,17 +407,21 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
             ].copy()
 
             if not nearby_df.empty:
-                 nearby_df['Target_Boundary'] = boundary_score
+                 nearby_df['Target_Boundary_Score'] = boundary_score
                  nearby_df['Points_to_Upgrade'] = boundary_score - nearby_df['Score']
                  target_grade = start_score_to_grade.get(boundary_score, "N/A") # Grade they would get if they reach boundary
                  nearby_df['Target_Grade'] = target_grade
                  students_near_cutoff_list.append(nearby_df)
 
         if students_near_cutoff_list:
-            students_near_df = pd.concat(students_near_cutoff_list).sort_values(['Target_Boundary', 'Score'])
-            # Define columns including Name (if exists) or StudentID
-            name_col_near = 'Name' if 'Name' in students_near_df.columns else 'StudentID'
-            cols_near = [name_col_near, 'Score', 'Section', 'Letter_Grade', 'Target_Grade', 'Points_to_Upgrade']
+            students_near_df = pd.concat(students_near_cutoff_list).sort_values(['Target_Boundary_Score', 'Score'])
+            # Define columns including separate names if available
+            name_cols_near = []
+            if 'LastName' in students_near_df.columns: name_cols_near.append('LastName')
+            if 'FirstName' in students_near_df.columns: name_cols_near.append('FirstName')
+            if not name_cols_near and 'StudentID' in students_near_df.columns: name_cols_near.append('StudentID') # Fallback
+
+            cols_near = name_cols_near + ['Score', 'Section', 'Letter_Grade', 'Target_Grade', 'Points_to_Upgrade']
             cols_near_exist = [col for col in cols_near if col in students_near_df.columns]
             st.dataframe(students_near_df[cols_near_exist].style.format({
                 "Score": "{:.2f}", "Points_to_Upgrade": "{:.2f}"
@@ -432,23 +442,17 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
         # <<< Combined Overall and Section Distributions Table >>>
         if "overall_dist" in results and not results['overall_dist'].empty and \
            "section_dist" in results and not results['section_dist'].empty:
-
-            # Prepare overall distribution series
             overall_series = results['overall_dist'].rename('Overall (%)') * 100
-
-            # Prepare section distribution dataframe
             section_dist_df = results['section_dist'] * 100
-            # Ensure all standard grades are columns, ordered correctly
-            all_grades_ordered = ['A+', 'A', 'B+', 'B', 'C+', 'C', 'D+', 'D', 'F'] # Desired order
+            all_grades_ordered = ['A+', 'A', 'B+', 'B', 'C+', 'C', 'D+', 'D', 'F', 'Invalid Score'] # Add Invalid Score
             section_dist_df = section_dist_df.reindex(columns=all_grades_ordered, fill_value=0)
+            # Align overall series index with all_grades_ordered too
+            overall_series = overall_series.reindex(all_grades_ordered, fill_value=0)
 
-            # Combine them (align index - which is grade)
-            combined_dist = pd.concat([overall_series, section_dist_df.T], axis=1) # Transpose sections to columns
+            combined_dist = pd.concat([overall_series, section_dist_df.T], axis=1)
             combined_dist.index.name = 'Grade'
             st.dataframe(combined_dist.style.format("{:.1f}%").highlight_null(null_color='transparent'))
-
         elif "overall_dist" in results and not results['overall_dist'].empty:
-            # Fallback to showing only overall if section dist failed
             st.write("**Overall Distribution Only:**")
             st.dataframe(results['overall_dist'].apply("{:.1%}".format))
         else:
@@ -465,7 +469,6 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
         with col_gpa1: # Section GPA Table & ANOVA
              st.write("**Per Section Avg GPA:**")
              if "section_stats" in results and not results['section_stats'].empty:
-                   # Format NaN Avg_GPA as N/A explicitly
                    results['section_stats']['Avg_GPA_Formatted'] = results['section_stats']['Avg_GPA'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
                    st.dataframe(results['section_stats'][['Section', 'Avg_GPA_Formatted', 'Count']])
              else: st.write("N/A")
@@ -476,14 +479,16 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
              try: # Section GPA Boxplot
                  if st.session_state.df_graded is not None and 'GPA' in st.session_state.df_graded.columns and st.session_state.df_graded['GPA'].notna().any():
                      fig_box, ax_box = plt.subplots()
-                     sns.boxplot(data=st.session_state.df_graded, x='Section', y='GPA', ax=ax_box)
+                     # Use sorted section order for consistent boxplot order
+                     sorted_sections = sorted(st.session_state.df_graded['Section'].unique())
+                     sns.boxplot(data=st.session_state.df_graded, x='Section', y='GPA', ax=ax_box, order=sorted_sections)
                      ax_box.set_title("GPA Distribution by Section")
                      plt.xticks(rotation=45, ha='right'); st.pyplot(fig_box); plt.close(fig_box)
                  else: st.warning("GPA data not available for boxplot.")
              except Exception as e: st.warning(f"Could not generate section GPA boxplot: {e}")
 
 
-        # --- Failing Students Analysis ---
+        # --- Failing Students Analysis (with separate Names) ---
         st.subheader("Failing Students Analysis")
         if st.session_state.df_graded is not None and 'Letter_Grade' in st.session_state.df_graded.columns:
             passing_score = st.session_state.active_cutoffs.get('D_Start', None)
@@ -495,9 +500,11 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
                     st.write(f"Passing Score (D Start): {passing_score:.2f}")
                     # <<< Show Separate Names if available >>>
                     fail_cols = ['Score', 'Section', 'Points_Below_Pass']
+                    # Add name cols in preferred order
                     if 'LastName' in failing_students.columns: fail_cols.insert(0, 'LastName')
                     if 'FirstName' in failing_students.columns: fail_cols.insert(0, 'FirstName')
-                    if 'Name' not in fail_cols and 'StudentID' in failing_students.columns : fail_cols.insert(0,'StudentID') # Show ID if no names
+                    # Add ID as fallback if no name cols are present
+                    if 'FirstName' not in fail_cols and 'LastName' not in fail_cols and 'StudentID' in failing_students.columns: fail_cols.insert(0,'StudentID')
                     cols_fail_exist = [col for col in fail_cols if col in failing_students.columns]
                     st.dataframe(failing_students[cols_fail_exist].style.format({"Score": "{:.2f}", "Points_Below_Pass": "{:.2f}"}))
                     # <<< End Name Update >>>
@@ -506,7 +513,7 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
         else: st.warning("Final grades needed to analyze failing students.")
 
 
-        # --- Final Assigned Grades Table (with name and styling fixes) ---
+        # --- Final Assigned Grades Table (with separate Names and improved styling) ---
         st.subheader("Final Assigned Grades Table")
         if st.session_state.df_graded is not None:
              df_final = st.session_state.df_graded.copy()
@@ -519,22 +526,23 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
              # Apply Styling using apply row-wise
              # Regenerate section colors based on final data
              section_color_map_generated.clear(); color_cycle = itertools.cycle(SECTION_COLOR_PALETTE)
-             unique_sections_final = df_to_display['Section'].unique()
-             for section in unique_sections_final: get_section_color_fixed(section)
+             unique_sections_final = sorted(df_to_display['Section'].unique())
+             for section in unique_sections_final: get_section_color_fixed(section) # Pre-assign colors
 
              styler = df_to_display.style.apply(apply_row_styles, axis=1)
 
              # Display styled dataframe using HTML
-             st.markdown(styler.format({"Score": "{:.2f}", "GPA": "{:.2f}"}).to_html(escape=False, index=False), unsafe_allow_html=True)
+             # Use index=False to hide the default pandas index
+             st.markdown(styler.format({"Score": "{:.2f}", "GPA": "{:.2f}"}).hide(axis="index").to_html(escape=False), unsafe_allow_html=True)
 
 
              # --- Download Section ---
              st.subheader("Download Grades")
              sections = ["All Sections"] + sorted(df_final['Section'].unique().tolist())
-             selected_section = st.selectbox("Select section to download:", options=sections, key="download_section_select_v2")
+             selected_section = st.selectbox("Select section to download:", options=sections, key="download_section_select_v3") # Incremented key
 
-             # Removed caching as df changes frequently with adjustments
              def convert_df_to_csv_orig(df_to_convert, section_filter):
+                 # ... (Filtering logic remains the same) ...
                  if section_filter != "All Sections":
                      df_filtered = df_to_convert[df_to_convert['Section'] == section_filter].copy()
                  else:
@@ -550,7 +558,7 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
                 csv_data = convert_df_to_csv_orig(df_final, selected_section)
                 if csv_data:
                     file_name = f"final_grades_{selected_section.replace(' ', '_')}.csv" if selected_section != "All Sections" else "final_grades_all.csv"
-                    st.download_button(label=f"Download Grades for {selected_section}", data=csv_data, file_name=file_name, mime='text/csv', key=f"download_{selected_section}_v2")
+                    st.download_button(label=f"Download Grades for {selected_section}", data=csv_data, file_name=file_name, mime='text/csv', key=f"download_{selected_section}_v3") # Use dynamic key
              except Exception as e: st.error(f"Could not prepare download file: {e}")
              # --- End Download Section ---
 
@@ -561,4 +569,4 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
 
 # Footer
 st.sidebar.markdown("---")
-st.sidebar.info("Iterative Grading Tool v1.3")
+st.sidebar.info("Iterative Grading Tool v1.4")
