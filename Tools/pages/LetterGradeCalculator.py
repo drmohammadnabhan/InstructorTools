@@ -1,4 +1,4 @@
-# Full code block v1.19 - Removed boxplot debugging statements
+# Full code block v1.20 - Added bar plot for grade counts by section
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -114,7 +114,7 @@ def reset_section_color_cycle():
 # Streamlit App Layout
 # ============================================
 st.set_page_config(layout="wide")
-st.title("Iterative Grading Assistant v1.19") # Version update
+st.title("Iterative Grading Assistant v1.20") # Version update
 st.info("**Workflow:**\n"
         "1. Set Initial Parameters.\n2. Calculate Initial Cutoffs.\n3. Upload Score File & Map Columns.\n"
         "4. Review (adjust 'Students Below Cutoffs' range if needed).\n5. Optionally: Adjust Start Scores & Apply.\n"
@@ -166,7 +166,7 @@ def new_file_uploaded_callback():
     st.session_state.column_mappings = {'col_first': None, 'col_last': None, 'col_id': None, 'col_score': None, 'col_section': None}
     st.session_state.data_loaded = False; st.session_state.processed_df = None
     st.session_state.df_graded = None; st.session_state.stats_results = None
-uploaded_file = st.file_uploader("Upload scores (CSV/Excel)", ["csv", "xlsx"], key="file_uploader_v20_main", on_change=new_file_uploaded_callback) # Incremented key
+uploaded_file = st.file_uploader("Upload scores (CSV/Excel)", ["csv", "xlsx"], key="file_uploader_v21_main", on_change=new_file_uploaded_callback) # Incremented key
 
 if uploaded_file:
     try:
@@ -175,7 +175,7 @@ if uploaded_file:
         st.subheader("Map Columns"); cols_from_file = df_upload.columns.tolist(); cols_with_none_option = ["<Select Column>"] + cols_from_file
         current_map = st.session_state.column_mappings
         def get_idx(cn, cfn): return cfn.index(cn) if cn and cn in cfn else 0
-        key_sfx = "_fix_v20" # Incremented key
+        key_sfx = "_fix_v21" # Incremented key
         col_first_selection = st.selectbox("First Name (Optional)", cols_with_none_option, get_idx(current_map['col_first'], cols_with_none_option), key='sel_first'+key_sfx)
         col_last_selection = st.selectbox("Last Name (Optional)", cols_with_none_option, get_idx(current_map['col_last'], cols_with_none_option), key='sel_last'+key_sfx)
         col_id_selection = st.selectbox("Student ID (Optional)", cols_with_none_option, get_idx(current_map['col_id'], cols_with_none_option), key='sel_id'+key_sfx)
@@ -225,7 +225,7 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
                 key = grade_keys_in_order[grade_idx];
                 with cols[c_idx]:
                     default_val = float(current_manual_vals.get(key, st.session_state.active_cutoffs.get(key, 0.0)))
-                    manual_cutoffs_input[key] = st.number_input(key.replace('_Start', ' Start'), value=default_val, step=0.1, key=f'man_{key}_v21', format="%.2f") # Incremented key
+                    manual_cutoffs_input[key] = st.number_input(key.replace('_Start', ' Start'), value=default_val, step=0.1, key=f'man_{key}_v22', format="%.2f") # Incremented key
     manual_cutoffs_input['F_Max'] = manual_cutoffs_input.get('D_Start', 0.0)
     if st.button("Apply Manual Cutoffs & Recalculate"):
         scores_list = [manual_cutoffs_input[key] for key in grade_keys_in_order if key in manual_cutoffs_input]
@@ -267,7 +267,7 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
             st.session_state.stats_results = None
 
     st.header("Visualization & Observation")
-    st.session_state.points_near_cutoff_active = st.number_input("Range for 'Students Below Cutoffs'", 0.1, 10.0, st.session_state.points_near_cutoff_active, 0.1, "%.1f", key='points_near_override_v10') # Incremented key
+    st.session_state.points_near_cutoff_active = st.number_input("Range for 'Students Below Cutoffs'", 0.1, 10.0, st.session_state.points_near_cutoff_active, 0.1, "%.1f", key='points_near_override_v11') # Incremented key
     active_points_near = st.session_state.points_near_cutoff_active
     plot_cutoffs = sorted(list(set(v for k, v in st.session_state.active_cutoffs.items() if k != 'F_Max')))
     st.subheader("Score Distribution")
@@ -325,20 +325,53 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
                 all_grades_order = ['A+','A','B+','B','C+','C','D+','D','F'] + [g for g in GPA_SCALE if 'Error' in g or 'Invalid' in g]
                 present_grades = overall_cnt.index.union(section_cnt.columns if not section_cnt.empty else [])
                 sorted_grades_display = [g for g in all_grades_order if g in present_grades] + [g for g in present_grades if g not in all_grades_order]
+                
+                # Display Table for Counts and Percentages
                 rows = []
                 for grade in sorted_grades_display:
                     row = {'Grade': grade, 'Overall': f"{overall_cnt.get(grade,0)} ({overall_pct.get(grade,0)*100:.1f}%)"}
-                    if not section_cnt.empty:
-                        for sec_name in section_cnt.index:
+                    if not section_cnt.empty and isinstance(section_cnt, pd.DataFrame): # Ensure it's a DataFrame
+                        for sec_name in section_cnt.index: # Sections are rows in section_cnt
                             s_cnt = section_cnt.loc[sec_name, grade] if grade in section_cnt.columns else 0
-                            s_pct = (section_pct.loc[sec_name, grade] if grade in section_pct.columns else 0) * 100
-                            row[str(sec_name)] = f"{s_cnt} ({s_pct:.1f}%)"
+                            s_pct_val = 0.0
+                            if not section_pct.empty and isinstance(section_pct, pd.DataFrame) and \
+                               sec_name in section_pct.index and grade in section_pct.columns:
+                                s_pct_val = section_pct.loc[sec_name, grade] * 100
+                            row[str(sec_name)] = f"{s_cnt} ({s_pct_val:.1f}%)"
                     rows.append(row)
                 if rows: st.markdown(pd.DataFrame(rows).set_index('Grade').to_html(escape=False), unsafe_allow_html=True)
-                else: st.write("No distribution data.")
-            except Exception as e: st.error(f"Error displaying grade distributions: {e}")
+                else: st.write("No distribution data for table.")
+
+                # Add Bar Plot for Grade Counts by Section
+                st.write("---") # Separator
+                st.subheader("Grade Counts by Section (Bar Plot)")
+                if not section_cnt.empty and isinstance(section_cnt, pd.DataFrame):
+                    df_plot_counts = section_cnt.T.reindex(sorted_grades_display).fillna(0) # Grades on X-axis, Sections as groups
+                    df_plot_counts = df_plot_counts.loc[(df_plot_counts.sum(axis=1) > 0)] # Keep only grades with some counts
+
+                    if not df_plot_counts.empty:
+                        reset_section_color_cycle() # Ensure fresh colors for this plot
+                        plot_colors = [get_section_color_fixed(str(sec)) for sec in df_plot_counts.columns]
+                        
+                        fig_bar_dist, ax_bar_dist = plt.subplots(figsize=(12, 6))
+                        df_plot_counts.plot(kind='bar', ax=ax_bar_dist, color=plot_colors, width=0.8)
+                        ax_bar_dist.set_title('Grade Counts by Section')
+                        ax_bar_dist.set_ylabel('Number of Students')
+                        ax_bar_dist.set_xlabel('Grade')
+                        plt.xticks(rotation=45, ha='right')
+                        ax_bar_dist.legend(title='Section', bbox_to_anchor=(1.02, 1), loc='upper left')
+                        plt.tight_layout(rect=[0, 0, 0.85, 1])
+                        st.pyplot(fig_bar_dist)
+                        plt.close(fig_bar_dist)
+                    else:
+                        st.write("No data to plot for grade counts by section (all counts might be zero).")
+                else:
+                    st.write("Section count data not available for bar plot.")
+
+            except Exception as e: st.error(f"Error displaying grade distributions or plot: {e}")
         else: st.write("Distribution data missing.")
         st.write(f"**Overall Avg GPA:** {results.get('overall_gpa', np.nan):.2f}" if pd.notna(results.get('overall_gpa')) else "**Overall Avg GPA:** N/A"); st.write("---")
+        
         st.subheader("Section GPA Comparison")
         col_gpa_table_final, col_gpa_plot_final = st.columns(2)
         with col_gpa_table_final:
@@ -353,19 +386,16 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
         with col_gpa_plot_final:
             st.write("**GPA Distribution by Section (Boxplot)**")
             gpa_boxplot_drawn = False
-            if st.session_state.df_graded is not None: # df_graded should now reliably have 'GPA'
-                # Removed the extensive debugging st.write lines for boxplot as it's now working
-                if 'GPA' in st.session_state.df_graded.columns and st.session_state.df_graded['GPA'].notna().any():
-                    try:
-                        fig_box, ax_box = plt.subplots(); sections_sorted = sorted(st.session_state.df_graded['Section'].unique())
-                        sns.boxplot(data=st.session_state.df_graded, x='Section', y='GPA', ax=ax_box, order=sections_sorted)
-                        ax_box.set_title("GPA Distribution by Section"); plt.xticks(rotation=45, ha='right'); plt.tight_layout(); st.pyplot(fig_box); plt.close(fig_box)
-                        gpa_boxplot_drawn = True
-                    except Exception as e: st.warning(f"Could not generate GPA boxplot: {e}")
-                if not gpa_boxplot_drawn:
-                     st.warning("Boxplot not generated. This is likely because all derived GPA values are non-numeric (NaN). Please check assigned letter grades and ensure they correctly map to numeric GPAs in the GPA_SCALE.")
-            else: st.warning("Graded data (`df_graded`) is not available for boxplot.")
-
+            if st.session_state.df_graded is not None and 'GPA' in st.session_state.df_graded.columns and st.session_state.df_graded['GPA'].notna().any():
+                try:
+                    fig_box, ax_box = plt.subplots(); sections_sorted = sorted(st.session_state.df_graded['Section'].unique())
+                    sns.boxplot(data=st.session_state.df_graded, x='Section', y='GPA', ax=ax_box, order=sections_sorted)
+                    ax_box.set_title("GPA Distribution by Section"); plt.xticks(rotation=45, ha='right'); plt.tight_layout(); st.pyplot(fig_box); plt.close(fig_box)
+                    gpa_boxplot_drawn = True
+                except Exception as e: st.warning(f"Could not generate GPA boxplot: {e}")
+            if not gpa_boxplot_drawn: # If not drawn (either due to error or no valid GPA data)
+                 st.warning("Boxplot not generated. This is likely because all derived GPA values are non-numeric (NaN) or data is unavailable. Please check assigned letter grades and ensure they map to numeric GPAs.")
+        
         st.subheader("Failing Students Analysis")
         if st.session_state.df_graded is not None and 'Letter_Grade' in st.session_state.df_graded.columns:
             passing_score_boundary = st.session_state.active_cutoffs.get('D_Start', None)
@@ -396,7 +426,7 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
             st.subheader("Download Grades")
             if not df_final_styled.empty:
                 sections_for_download = ["All Sections"] + sorted(df_final_styled['Section'].unique().tolist())
-                selected_section_download = st.selectbox("Select section to download:", sections_for_download, key="download_section_select_v17") # Inc key
+                selected_section_download = st.selectbox("Select section to download:", sections_for_download, key="download_section_select_v18") # Inc key
                 def convert_df_to_csv_download(df_to_convert, section_filter_val):
                     df_filtered_dl = df_to_convert.copy()
                     if section_filter_val != "All Sections": df_filtered_dl = df_to_convert[df_to_convert['Section'] == section_filter_val].copy()
@@ -407,11 +437,11 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
                     csv_data_download = convert_df_to_csv_download(df_final_styled, selected_section_download)
                     if csv_data_download:
                         file_name_dl = f"final_grades_{selected_section_download.replace(' ', '_')}.csv" if selected_section_download != "All Sections" else "final_grades_all_sections.csv"
-                        st.download_button(label=f"Download Grades for {selected_section_download}", data=csv_data_download, file_name=file_name_dl, mime='text/csv', key=f"download_btn_{selected_section_download.replace(' ', '_')}_v17") # Inc key
+                        st.download_button(label=f"Download Grades for {selected_section_download}", data=csv_data_download, file_name=file_name_dl, mime='text/csv', key=f"download_btn_{selected_section_download.replace(' ', '_')}_v18") # Inc key
                     elif selected_section_download: st.warning(f"No data for section: {selected_section_download}")
                 except Exception as e: st.error(f"Could not prepare download file: {e}")
             else: st.warning("No final graded data to download.")
         else: st.warning("Final graded data not available.")
     elif st.session_state.active_cutoffs: st.warning("Statistics could not be calculated. Check data, grade assignment, and cutoffs.")
 
-st.sidebar.markdown("---"); st.sidebar.info("Iterative Grading Tool v1.19")
+st.sidebar.markdown("---"); st.sidebar.info("Iterative Grading Tool v1.20")
