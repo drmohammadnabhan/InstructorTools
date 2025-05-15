@@ -1,4 +1,4 @@
-# Full code block v1.20 - Added bar plot for grade counts by section
+# Full code block v1.21 - Added alternative cutoff initialization method
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -14,16 +14,55 @@ import itertools
 # Helper Functions
 # ============================================
 def calculate_initial_cutoffs_original(a_plus_start, gap):
+    """Calculates initial cutoffs working downwards from A+ start with a uniform gap."""
     cutoffs = collections.OrderedDict()
     grades_order = ['A+', 'A', 'B+', 'B', 'C+', 'C', 'D+', 'D']
-    current_start = a_plus_start
+    current_start = float(a_plus_start)
+    gap = float(gap)
     for i, grade in enumerate(grades_order):
-        cutoffs[f'{grade}_Start'] = current_start
-        current_start -= gap if i < len(grades_order) - 1 else 0
+        cutoffs[f'{grade}_Start'] = round(current_start, 2)
+        if i < len(grades_order) - 1: # Don't subtract for the last grade (D)
+            current_start -= gap
     cutoffs['F_Max'] = cutoffs['D_Start']
     return cutoffs
 
+def calculate_cutoffs_by_endpoints(a_plus_start_score, d_start_score):
+    """Calculates initial cutoffs based on A+ Start and D Start, with equal intervals in between."""
+    cutoffs = collections.OrderedDict()
+    grades_order = ['A+', 'A', 'B+', 'B', 'C+', 'C', 'D+', 'D'] # 8 grades mean 7 intervals
+    num_intervals = 7.0
+
+    a_plus_start_score = float(a_plus_start_score)
+    d_start_score = float(d_start_score)
+
+    # Validation is done before calling, but as a safeguard:
+    if a_plus_start_score <= d_start_score:
+        # This should be caught by UI validation ideally
+        st.error("A+ Start Score must be strictly greater than D Start Score for this method.")
+        return None 
+
+    total_range = a_plus_start_score - d_start_score
+    if num_intervals == 0: return None # Should not happen
+    
+    individual_gap = total_range / num_intervals
+
+    current_score = a_plus_start_score
+    for i, grade in enumerate(grades_order):
+        # The start of D is fixed by d_start_score, other grades are derived
+        if grade == 'D':
+            cutoffs[f'{grade}_Start'] = round(d_start_score, 2)
+        else:
+            cutoffs[f'{grade}_Start'] = round(current_score, 2)
+        
+        if i < len(grades_order) - 1: # For all grades except D
+            current_score -= individual_gap
+            
+    cutoffs['F_Max'] = cutoffs['D_Start']
+    return cutoffs
+
+
 def assign_letter_grades_from_starts(scores, start_cutoffs):
+    # ... (assign_letter_grades_from_starts function from v1.19 - assumed correct and unchanged)
     expected_grade_order_keys = ['A+_Start', 'A_Start', 'B+_Start', 'B_Start', 'C+_Start', 'C_Start', 'D+_Start', 'D_Start']
     present_grade_keys = [k for k in expected_grade_order_keys if k in start_cutoffs]
     if len(present_grade_keys) > 1:
@@ -57,7 +96,9 @@ def assign_letter_grades_from_starts(scores, start_cutoffs):
     grades = pd.cut(numeric_scores, bins=bins, labels=labels_for_cut, right=False, ordered=False)
     return grades.astype('object').fillna('Invalid Score')
 
+
 def calculate_stats(df_with_gpa, grade_col, section_col, gpa_map):
+    # ... (calculate_stats function from v1.19 - assumed correct and unchanged)
     if grade_col not in df_with_gpa.columns or 'GPA' not in df_with_gpa.columns:
         st.warning("Cannot calculate stats: Grade or GPA column missing in the provided DataFrame.")
         return {"error": "Missing Grade/GPA column for stats."}
@@ -114,34 +155,108 @@ def reset_section_color_cycle():
 # Streamlit App Layout
 # ============================================
 st.set_page_config(layout="wide")
-st.title("Iterative Grading Assistant v1.20") # Version update
+st.title("Iterative Grading Assistant v1.21") # Version update
 st.info("**Workflow:**\n"
-        "1. Set Initial Parameters.\n2. Calculate Initial Cutoffs.\n3. Upload Score File & Map Columns.\n"
+        "1. Set Initial Parameters (choose initialization method).\n2. Calculate Initial Cutoffs.\n3. Upload Score File & Map Columns.\n"
         "4. Review (adjust 'Students Below Cutoffs' range if needed).\n5. Optionally: Adjust Start Scores & Apply.\n"
         "6. Review Final Results.\n7. Download grades.")
 
+# --- Session State Initialization ---
 if 'column_mappings' not in st.session_state: st.session_state.column_mappings = {'col_first': None, 'col_last': None, 'col_id': None, 'col_score': None, 'col_section': None}
 for key in ['initial_cutoffs', 'active_cutoffs', 'df_graded', 'stats_results', 'processed_df']:
     if key not in st.session_state: st.session_state[key] = None
 if 'manual_override_values' not in st.session_state: st.session_state.manual_override_values = {}
 if 'data_loaded' not in st.session_state: st.session_state.data_loaded = False
 if 'points_near_cutoff_active' not in st.session_state: st.session_state.points_near_cutoff_active = 1.5
+# For persisting sidebar input values
+if 'a_plus_start_val_sidebar' not in st.session_state: st.session_state.a_plus_start_val_sidebar = 95.0
+if 'uniform_gap_val_sidebar' not in st.session_state: st.session_state.uniform_gap_val_sidebar = 5.0
+if 'd_start_val_sidebar' not in st.session_state: st.session_state.d_start_val_sidebar = 60.0
 
+
+# --- Sidebar ---
 st.sidebar.header("1. Initial Parameters")
-a_plus_start_score = st.sidebar.number_input("A+ Start Score", value=95.0, step=0.1, format="%.2f")
-uniform_grade_gap = st.sidebar.number_input("Uniform Grade Gap", value=5.0, step=0.1, min_value=0.1, format="%.2f")
-def update_active_points_from_sidebar(): st.session_state.points_near_cutoff_active = st.session_state.points_near_num_v7_sidebar_key
+
+init_method_options = ("A+ Start & Uniform Gap", "A+ Start & D Start (Equal Intervals)")
+init_method = st.sidebar.radio(
+    "Cutoff Initialization Method",
+    options=init_method_options,
+    key='init_method_radio_selector'
+)
+
+# Store and retrieve values from session state to persist them across method switches
+st.session_state.a_plus_start_val_sidebar = st.sidebar.number_input(
+    "A+ Start Score",
+    value=float(st.session_state.a_plus_start_val_sidebar), # Use float for consistency
+    step=0.1, format="%.2f",
+    help="Minimum score for A+.",
+    key='common_a_plus_start_input'
+)
+
+uniform_grade_gap_input = None
+d_start_score_input = None
+
+if init_method == init_method_options[0]: # "A+ Start & Uniform Gap"
+    st.session_state.uniform_gap_val_sidebar = st.sidebar.number_input(
+        "Uniform Grade Gap (points)",
+        value=float(st.session_state.uniform_gap_val_sidebar),
+        step=0.1, min_value=0.01, format="%.2f", # min_value > 0
+        help="Gap between grade starts (e.g., A+ to A, A to B+).",
+        key='uniform_gap_specific_input'
+    )
+    uniform_grade_gap_input = st.session_state.uniform_gap_val_sidebar
+else: # "A+ Start & D Start (Equal Intervals)"
+    st.session_state.d_start_val_sidebar = st.sidebar.number_input(
+        "D Start Score",
+        value=float(st.session_state.d_start_val_sidebar),
+        step=0.1, format="%.2f",
+        help="Minimum score for D.",
+        key='d_start_specific_input'
+    )
+    d_start_score_input = st.session_state.d_start_val_sidebar
+
+
+def update_active_points_from_sidebar(): st.session_state.points_near_cutoff_active = st.session_state.points_near_num_v8_sidebar_key # Incremented key
 st.sidebar.number_input("Initial: Students Below Cutoff (X pts)", 0.1, 10.0, st.session_state.points_near_cutoff_active, 0.1, "%.1f",
-                        key='points_near_num_v7_sidebar_key', on_change=update_active_points_from_sidebar,
+                        key='points_near_num_v8_sidebar_key', on_change=update_active_points_from_sidebar,
                         help="Initial range. Can be overridden in main panel.")
 
 if st.sidebar.button("Calculate Initial Cutoffs"):
-    st.session_state.initial_cutoffs = calculate_initial_cutoffs_original(a_plus_start_score, uniform_grade_gap)
-    st.session_state.active_cutoffs = st.session_state.initial_cutoffs
-    st.session_state.manual_override_values = {**st.session_state.initial_cutoffs}
-    st.session_state.df_graded, st.session_state.stats_results = None, None
-    st.sidebar.success("Initial cutoffs calculated.")
-    if st.session_state.data_loaded: st.rerun()
+    calculated_cutoffs_result = None
+    a_plus_val = st.session_state.a_plus_start_val_sidebar
+
+    if init_method == init_method_options[0]:
+        if uniform_grade_gap_input is not None and uniform_grade_gap_input > 0:
+            calculated_cutoffs_result = calculate_initial_cutoffs_original(a_plus_val, uniform_grade_gap_input)
+        else:
+            st.sidebar.error("Uniform Grade Gap must be greater than 0.")
+    elif init_method == init_method_options[1]:
+        if d_start_score_input is not None:
+            if a_plus_val <= d_start_score_input:
+                st.sidebar.error("A+ Start Score must be strictly greater than D Start Score.")
+            else:
+                calculated_cutoffs_result = calculate_cutoffs_by_endpoints(a_plus_val, d_start_score_input)
+        else: # Should not happen due to UI structure
+            st.sidebar.error("D Start Score is missing for the selected method.")
+
+    if calculated_cutoffs_result:
+        st.session_state.initial_cutoffs = calculated_cutoffs_result
+        st.session_state.active_cutoffs = calculated_cutoffs_result
+        st.session_state.manual_override_values = {**calculated_cutoffs_result}
+        st.session_state.df_graded, st.session_state.stats_results = None, None
+        st.sidebar.success(f"Initial cutoffs calculated using: {init_method}")
+        if st.session_state.data_loaded: st.rerun()
+    elif not (init_method == init_method_options[1] and a_plus_val <= d_start_score_input) and \
+         not (init_method == init_method_options[0] and (uniform_grade_gap_input is None or uniform_grade_gap_input <=0)):
+        # If not one of the explicit user input errors above, but calculation still failed
+        st.sidebar.error("Failed to calculate cutoffs. Please check input values.")
+
+
+# --- Main Area ---
+# ... (Rest of the Main Area code from v1.19, starting with col_cutoff_table, col_width_table) ...
+# ... This includes Upload Section, Manual Cutoff Adjustment, Recalculation logic, ...
+# ... Visualizations, Students Below Cutoffs, Final Results (Table, Plot, GPA, Failing, Download) ...
+# Ensure all keys for widgets are unique and incremented if structure changed significantly.
 
 col_cutoff_table, col_width_table = st.columns([1, 2])
 with col_cutoff_table:
@@ -162,11 +277,11 @@ with col_width_table:
         else: st.write("Cannot calculate widths.")
 
 st.header("Upload & Prepare Data")
-def new_file_uploaded_callback():
+def new_file_uploaded_callback_v21(): # Renamed for clarity
     st.session_state.column_mappings = {'col_first': None, 'col_last': None, 'col_id': None, 'col_score': None, 'col_section': None}
     st.session_state.data_loaded = False; st.session_state.processed_df = None
     st.session_state.df_graded = None; st.session_state.stats_results = None
-uploaded_file = st.file_uploader("Upload scores (CSV/Excel)", ["csv", "xlsx"], key="file_uploader_v21_main", on_change=new_file_uploaded_callback) # Incremented key
+uploaded_file = st.file_uploader("Upload scores (CSV/Excel)", ["csv", "xlsx"], key="file_uploader_v22_main", on_change=new_file_uploaded_callback_v21) # Incremented key
 
 if uploaded_file:
     try:
@@ -175,7 +290,7 @@ if uploaded_file:
         st.subheader("Map Columns"); cols_from_file = df_upload.columns.tolist(); cols_with_none_option = ["<Select Column>"] + cols_from_file
         current_map = st.session_state.column_mappings
         def get_idx(cn, cfn): return cfn.index(cn) if cn and cn in cfn else 0
-        key_sfx = "_fix_v21" # Incremented key
+        key_sfx = "_fix_v22" # Incremented key
         col_first_selection = st.selectbox("First Name (Optional)", cols_with_none_option, get_idx(current_map['col_first'], cols_with_none_option), key='sel_first'+key_sfx)
         col_last_selection = st.selectbox("Last Name (Optional)", cols_with_none_option, get_idx(current_map['col_last'], cols_with_none_option), key='sel_last'+key_sfx)
         col_id_selection = st.selectbox("Student ID (Optional)", cols_with_none_option, get_idx(current_map['col_id'], cols_with_none_option), key='sel_id'+key_sfx)
@@ -217,15 +332,15 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
     manual_cutoffs_input = {}; grade_keys_in_order = ['A+_Start', 'A_Start', 'B+_Start', 'B_Start', 'C+_Start', 'C_Start', 'D+_Start', 'D_Start']
     current_manual_vals = st.session_state.manual_override_values; num_grades = len(grade_keys_in_order)
     cols_per_row = 4; num_rows = (num_grades + cols_per_row - 1) // cols_per_row
-    for r in range(num_rows):
+    for r_idx in range(num_rows): # Renamed r to r_idx
         cols = st.columns(cols_per_row)
         for c_idx in range(cols_per_row):
-            grade_idx = r * cols_per_row + c_idx
+            grade_idx = r_idx * cols_per_row + c_idx
             if grade_idx < num_grades:
                 key = grade_keys_in_order[grade_idx];
                 with cols[c_idx]:
                     default_val = float(current_manual_vals.get(key, st.session_state.active_cutoffs.get(key, 0.0)))
-                    manual_cutoffs_input[key] = st.number_input(key.replace('_Start', ' Start'), value=default_val, step=0.1, key=f'man_{key}_v22', format="%.2f") # Incremented key
+                    manual_cutoffs_input[key] = st.number_input(key.replace('_Start', ' Start'), value=default_val, step=0.1, key=f'man_{key}_v23', format="%.2f") # Incremented key
     manual_cutoffs_input['F_Max'] = manual_cutoffs_input.get('D_Start', 0.0)
     if st.button("Apply Manual Cutoffs & Recalculate"):
         scores_list = [manual_cutoffs_input[key] for key in grade_keys_in_order if key in manual_cutoffs_input]
@@ -267,7 +382,7 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
             st.session_state.stats_results = None
 
     st.header("Visualization & Observation")
-    st.session_state.points_near_cutoff_active = st.number_input("Range for 'Students Below Cutoffs'", 0.1, 10.0, st.session_state.points_near_cutoff_active, 0.1, "%.1f", key='points_near_override_v11') # Incremented key
+    st.session_state.points_near_cutoff_active = st.number_input("Range for 'Students Below Cutoffs'", 0.1, 10.0, st.session_state.points_near_cutoff_active, 0.1, "%.1f", key='points_near_override_v12') # Incremented key
     active_points_near = st.session_state.points_near_cutoff_active
     plot_cutoffs = sorted(list(set(v for k, v in st.session_state.active_cutoffs.items() if k != 'F_Max')))
     st.subheader("Score Distribution")
@@ -312,8 +427,6 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
         else: st.write(f"No students found scoring between (Cutoff - {active_points_near:.1f}) and (Cutoff).")
     else: st.warning("Grade calculation needed or has errors for 'Students Near Cutoffs'.")
 
-    # Manual Upgrades Section UI is now REMOVED
-
     st.header("Final Results")
     if st.session_state.stats_results and not st.session_state.stats_results.get("error"):
         results = st.session_state.stats_results
@@ -325,53 +438,36 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
                 all_grades_order = ['A+','A','B+','B','C+','C','D+','D','F'] + [g for g in GPA_SCALE if 'Error' in g or 'Invalid' in g]
                 present_grades = overall_cnt.index.union(section_cnt.columns if not section_cnt.empty else [])
                 sorted_grades_display = [g for g in all_grades_order if g in present_grades] + [g for g in present_grades if g not in all_grades_order]
-                
-                # Display Table for Counts and Percentages
                 rows = []
                 for grade in sorted_grades_display:
                     row = {'Grade': grade, 'Overall': f"{overall_cnt.get(grade,0)} ({overall_pct.get(grade,0)*100:.1f}%)"}
-                    if not section_cnt.empty and isinstance(section_cnt, pd.DataFrame): # Ensure it's a DataFrame
-                        for sec_name in section_cnt.index: # Sections are rows in section_cnt
+                    if not section_cnt.empty and isinstance(section_cnt, pd.DataFrame):
+                        for sec_name in section_cnt.index:
                             s_cnt = section_cnt.loc[sec_name, grade] if grade in section_cnt.columns else 0
                             s_pct_val = 0.0
-                            if not section_pct.empty and isinstance(section_pct, pd.DataFrame) and \
-                               sec_name in section_pct.index and grade in section_pct.columns:
+                            if not section_pct.empty and isinstance(section_pct, pd.DataFrame) and sec_name in section_pct.index and grade in section_pct.columns:
                                 s_pct_val = section_pct.loc[sec_name, grade] * 100
                             row[str(sec_name)] = f"{s_cnt} ({s_pct_val:.1f}%)"
                     rows.append(row)
                 if rows: st.markdown(pd.DataFrame(rows).set_index('Grade').to_html(escape=False), unsafe_allow_html=True)
                 else: st.write("No distribution data for table.")
-
-                # Add Bar Plot for Grade Counts by Section
-                st.write("---") # Separator
+                st.write("---")
                 st.subheader("Grade Counts by Section (Bar Plot)")
                 if not section_cnt.empty and isinstance(section_cnt, pd.DataFrame):
-                    df_plot_counts = section_cnt.T.reindex(sorted_grades_display).fillna(0) # Grades on X-axis, Sections as groups
-                    df_plot_counts = df_plot_counts.loc[(df_plot_counts.sum(axis=1) > 0)] # Keep only grades with some counts
-
+                    df_plot_counts = section_cnt.T.reindex(sorted_grades_display).fillna(0)
+                    df_plot_counts = df_plot_counts.loc[(df_plot_counts.sum(axis=1) > 0)]
                     if not df_plot_counts.empty:
-                        reset_section_color_cycle() # Ensure fresh colors for this plot
-                        plot_colors = [get_section_color_fixed(str(sec)) for sec in df_plot_counts.columns]
-                        
+                        reset_section_color_cycle(); plot_colors = [get_section_color_fixed(str(sec)) for sec in df_plot_counts.columns]
                         fig_bar_dist, ax_bar_dist = plt.subplots(figsize=(12, 6))
                         df_plot_counts.plot(kind='bar', ax=ax_bar_dist, color=plot_colors, width=0.8)
-                        ax_bar_dist.set_title('Grade Counts by Section')
-                        ax_bar_dist.set_ylabel('Number of Students')
-                        ax_bar_dist.set_xlabel('Grade')
-                        plt.xticks(rotation=45, ha='right')
-                        ax_bar_dist.legend(title='Section', bbox_to_anchor=(1.02, 1), loc='upper left')
-                        plt.tight_layout(rect=[0, 0, 0.85, 1])
-                        st.pyplot(fig_bar_dist)
-                        plt.close(fig_bar_dist)
-                    else:
-                        st.write("No data to plot for grade counts by section (all counts might be zero).")
-                else:
-                    st.write("Section count data not available for bar plot.")
-
+                        ax_bar_dist.set_title('Grade Counts by Section'); ax_bar_dist.set_ylabel('Number of Students'); ax_bar_dist.set_xlabel('Grade')
+                        plt.xticks(rotation=45, ha='right'); ax_bar_dist.legend(title='Section', bbox_to_anchor=(1.02, 1), loc='upper left')
+                        plt.tight_layout(rect=[0, 0, 0.85, 1]); st.pyplot(fig_bar_dist); plt.close(fig_bar_dist)
+                    else: st.write("No data to plot for grade counts by section (all counts might be zero).")
+                else: st.write("Section count data not available for bar plot.")
             except Exception as e: st.error(f"Error displaying grade distributions or plot: {e}")
         else: st.write("Distribution data missing.")
         st.write(f"**Overall Avg GPA:** {results.get('overall_gpa', np.nan):.2f}" if pd.notna(results.get('overall_gpa')) else "**Overall Avg GPA:** N/A"); st.write("---")
-        
         st.subheader("Section GPA Comparison")
         col_gpa_table_final, col_gpa_plot_final = st.columns(2)
         with col_gpa_table_final:
@@ -393,9 +489,8 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
                     ax_box.set_title("GPA Distribution by Section"); plt.xticks(rotation=45, ha='right'); plt.tight_layout(); st.pyplot(fig_box); plt.close(fig_box)
                     gpa_boxplot_drawn = True
                 except Exception as e: st.warning(f"Could not generate GPA boxplot: {e}")
-            if not gpa_boxplot_drawn: # If not drawn (either due to error or no valid GPA data)
-                 st.warning("Boxplot not generated. This is likely because all derived GPA values are non-numeric (NaN) or data is unavailable. Please check assigned letter grades and ensure they map to numeric GPAs.")
-        
+            if not gpa_boxplot_drawn: st.warning("Boxplot not generated. This is likely because all derived GPA values are non-numeric (NaN) or data is unavailable. Please check assigned letter grades and ensure they map to numeric GPAs.")
+
         st.subheader("Failing Students Analysis")
         if st.session_state.df_graded is not None and 'Letter_Grade' in st.session_state.df_graded.columns:
             passing_score_boundary = st.session_state.active_cutoffs.get('D_Start', None)
@@ -426,7 +521,7 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
             st.subheader("Download Grades")
             if not df_final_styled.empty:
                 sections_for_download = ["All Sections"] + sorted(df_final_styled['Section'].unique().tolist())
-                selected_section_download = st.selectbox("Select section to download:", sections_for_download, key="download_section_select_v18") # Inc key
+                selected_section_download = st.selectbox("Select section to download:", sections_for_download, key="download_section_select_v19") # Inc key
                 def convert_df_to_csv_download(df_to_convert, section_filter_val):
                     df_filtered_dl = df_to_convert.copy()
                     if section_filter_val != "All Sections": df_filtered_dl = df_to_convert[df_to_convert['Section'] == section_filter_val].copy()
@@ -437,11 +532,11 @@ if st.session_state.data_loaded and df_display is not None and st.session_state.
                     csv_data_download = convert_df_to_csv_download(df_final_styled, selected_section_download)
                     if csv_data_download:
                         file_name_dl = f"final_grades_{selected_section_download.replace(' ', '_')}.csv" if selected_section_download != "All Sections" else "final_grades_all_sections.csv"
-                        st.download_button(label=f"Download Grades for {selected_section_download}", data=csv_data_download, file_name=file_name_dl, mime='text/csv', key=f"download_btn_{selected_section_download.replace(' ', '_')}_v18") # Inc key
+                        st.download_button(label=f"Download Grades for {selected_section_download}", data=csv_data_download, file_name=file_name_dl, mime='text/csv', key=f"download_btn_{selected_section_download.replace(' ', '_')}_v19") # Inc key
                     elif selected_section_download: st.warning(f"No data for section: {selected_section_download}")
                 except Exception as e: st.error(f"Could not prepare download file: {e}")
             else: st.warning("No final graded data to download.")
         else: st.warning("Final graded data not available.")
     elif st.session_state.active_cutoffs: st.warning("Statistics could not be calculated. Check data, grade assignment, and cutoffs.")
 
-st.sidebar.markdown("---"); st.sidebar.info("Iterative Grading Tool v1.20")
+st.sidebar.markdown("---"); st.sidebar.info("Iterative Grading Tool v1.21")
